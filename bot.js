@@ -87,7 +87,8 @@ bot.on('message', async (msg) => {
     const statusTime = time.toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
-      hour12: false
+      hour12: false,
+      timeZone: 'Asia/Jerusalem'
     })
     const timeAgo = minutes === 1 ? 'לפני דקה' : `לפני ${minutes} דקות`
     const currentStatus = statusText[data.status] ?? data.status
