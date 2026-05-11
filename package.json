@@ -1,5 +1,10 @@
 {
+  "name": "caveret-status-bot",
+  "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
     "dotenv": "^17.4.2",

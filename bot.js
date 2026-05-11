@@ -9,18 +9,44 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 )
 
+const labels = {
+  report: 'דיווח',
+  status: 'סטטוס',
+  open: 'פתוח',
+  closed: 'סגור'
+}
+
+const commands = {
+  report: new Set([labels.report, 'Report']),
+  status: new Set([labels.status, 'Status'])
+}
+
+const statusByText = {
+  [labels.open]: 'open',
+  [labels.closed]: 'closed',
+  Open: 'open',
+  Closed: 'closed'
+}
+
+const statusText = {
+  open: labels.open,
+  closed: labels.closed
+}
+
+const mainKeyboard = {
+  reply_markup: {
+    keyboard: [
+      [labels.report, labels.status]
+    ],
+    resize_keyboard: true
+  }
+}
+
 // --- START MENU ---
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
 
-  bot.sendMessage(chatId, 'Choose action:', {
-    reply_markup: {
-      keyboard: [
-        ['Report', 'Status']
-      ],
-      resize_keyboard: true
-    }
-  })
+  bot.sendMessage(chatId, 'בחר פעולה:', mainKeyboard)
 })
 
 // --- MAIN MENU HANDLER ---
@@ -28,18 +54,22 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id
   const text = msg.text
 
-  if (text === 'Report') {
-    bot.sendMessage(chatId, 'Report status:', {
+  if (!text) {
+    return
+  }
+
+  if (commands.report.has(text)) {
+    bot.sendMessage(chatId, 'דווח סטטוס:', {
       reply_markup: {
         keyboard: [
-          ['Open', 'Closed']
+          [labels.open, labels.closed]
         ],
         resize_keyboard: true
       }
     })
   }
 
-  if (text === 'Status') {
+  if (commands.status.has(text)) {
     const { data } = await supabase
       .from('reports')
       .select('*')
@@ -48,25 +78,34 @@ bot.on('message', async (msg) => {
       .single()
 
     if (!data) {
-      bot.sendMessage(chatId, 'No reports yet')
+      bot.sendMessage(chatId, 'אין דיווחים עדיין')
       return
     }
 
     const time = new Date(data.created_at)
     const minutes = Math.floor((Date.now() - time) / 60000)
+    const statusTime = time.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    })
+    const timeAgo = minutes === 1 ? 'לפני דקה' : `לפני ${minutes} דקות`
+    const currentStatus = statusText[data.status] ?? data.status
 
     bot.sendMessage(
       chatId,
-      `Last status: ${data.status.toUpperCase()} (${minutes} min ago)`
+      `סטטוס אחרון: ${currentStatus} בשעה ${statusTime} (${timeAgo})`
     )
   }
 
-  if (text === 'Open' || text === 'Closed') {
+  if (text in statusByText) {
+    const status = statusByText[text]
+
     await supabase.from('reports').insert({
       store_id: 'store_1',
-      status: text.toLowerCase()
+      status
     })
 
-    bot.sendMessage(chatId, `Recorded: ${text}`)
+    bot.sendMessage(chatId, `נשמר: ${text}`, mainKeyboard)
   }
 })
