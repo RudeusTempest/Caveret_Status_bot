@@ -10,6 +10,7 @@ const supabase = createClient(
 )
 
 const localTimeZone = process.env.LOCAL_TIME_ZONE || 'Asia/Jerusalem'
+const reportCooldownMs = 3 * 60 * 1000
 
 const labels = {
   report: 'דיווח',
@@ -45,6 +46,11 @@ const statusIcon = {
   open: '🟢',
   closed: '🔴'
 }
+
+const reservedRemarkTexts = new Set([
+  labels.addRemark,
+  labels.finish
+])
 
 const mainKeyboard = {
   reply_markup: {
@@ -84,6 +90,7 @@ const remarkKeyboard = {
 }
 
 const pendingReports = new Map()
+const lastReportTimes = new Map()
 
 function getTimeZoneParts(date, timeZone) {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -175,14 +182,62 @@ async function getTodayReports() {
   return data || []
 }
 
-async function saveReport(chatId, status, remark) {
+function getReporterId(msg) {
+  return msg.from?.id ?? msg.chat.id
+}
+
+function getCooldownRemainingMs(reporterId) {
+  const lastReportTime = lastReportTimes.get(reporterId)
+
+  if (!lastReportTime) {
+    return 0
+  }
+
+  return Math.max(0, reportCooldownMs - (Date.now() - lastReportTime))
+}
+
+function getCooldownMessage(remainingMs) {
+  const remainingMinutes = Math.ceil(remainingMs / 60000)
+
+  if (remainingMinutes === 1) {
+    return 'אפשר לשלוח דיווח נוסף בעוד דקה.'
+  }
+
+  return `אפשר לשלוח דיווח נוסף בעוד ${remainingMinutes} דקות.`
+}
+
+function normalizeRemark(remark) {
+  if (typeof remark !== 'string') {
+    return ''
+  }
+
+  const trimmedRemark = remark.trim()
+
+  if (!trimmedRemark || reservedRemarkTexts.has(trimmedRemark)) {
+    return ''
+  }
+
+  return trimmedRemark
+}
+
+async function saveReport(chatId, reporterId, status, remark) {
+  const cooldownRemainingMs = getCooldownRemainingMs(reporterId)
+
+  if (cooldownRemainingMs > 0) {
+    pendingReports.delete(chatId)
+    bot.sendMessage(chatId, getCooldownMessage(cooldownRemainingMs), mainKeyboard)
+    return false
+  }
+
   const report = {
     store_id: 'store_1',
     status
   }
 
-  if (remark) {
-    report.remark = remark
+  const normalizedRemark = normalizeRemark(remark)
+
+  if (normalizedRemark) {
+    report.remark = normalizedRemark
   }
 
   const { error } = await supabase.from('reports').insert(report)
@@ -194,6 +249,7 @@ async function saveReport(chatId, status, remark) {
   }
 
   pendingReports.delete(chatId)
+  lastReportTimes.set(reporterId, Date.now())
   bot.sendMessage(chatId, `נשמר: ${statusText[status] ?? status}`, mainKeyboard)
   return true
 }
@@ -208,6 +264,7 @@ bot.onText(/\/start/, (msg) => {
 // --- MAIN MENU HANDLER ---
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id
+  const reporterId = getReporterId(msg)
   const text = msg.text
 
   if (!text) {
@@ -215,6 +272,14 @@ bot.on('message', async (msg) => {
   }
 
   if (commands.report.has(text)) {
+    const cooldownRemainingMs = getCooldownRemainingMs(reporterId)
+
+    if (cooldownRemainingMs > 0) {
+      pendingReports.delete(chatId)
+      bot.sendMessage(chatId, getCooldownMessage(cooldownRemainingMs), mainKeyboard)
+      return
+    }
+
     pendingReports.set(chatId, { awaitingStatus: true })
     bot.sendMessage(chatId, 'דווח סטטוס:', reportKeyboard)
     return
@@ -223,14 +288,19 @@ bot.on('message', async (msg) => {
   const pendingReport = pendingReports.get(chatId)
 
   if (pendingReport?.awaitingRemark) {
-    const remark = text.trim()
+    if (commands.finish.has(text)) {
+      await saveReport(chatId, reporterId, pendingReport.status)
+      return
+    }
+
+    const remark = normalizeRemark(text)
 
     if (!remark) {
       bot.sendMessage(chatId, 'כתוב הערה:')
       return
     }
 
-    await saveReport(chatId, pendingReport.status, remark)
+    await saveReport(chatId, reporterId, pendingReport.status, remark)
     return
   }
 
@@ -256,7 +326,7 @@ bot.on('message', async (msg) => {
       return
     }
 
-    await saveReport(chatId, pendingReport.status)
+    await saveReport(chatId, reporterId, pendingReport.status)
     return
   }
 
@@ -272,7 +342,8 @@ bot.on('message', async (msg) => {
     const statusTime = formatReportTime(latestReport)
     const currentStatus = statusText[latestReport.status] ?? latestReport.status
     const currentStatusIcon = statusIcon[latestReport.status] ?? ''
-    const remarkLine = latestReport.remark ? `\nהערה: ${latestReport.remark}` : ''
+    const latestRemark = normalizeRemark(latestReport.remark)
+    const remarkLine = latestRemark ? `\nהערה: ${latestRemark}` : ''
 
     bot.sendMessage(
       chatId,
@@ -292,7 +363,8 @@ bot.on('message', async (msg) => {
     const reportLines = reports.map((report) => {
       const reportStatus = statusText[report.status] ?? report.status
       const reportIcon = statusIcon[report.status] ?? ''
-      const remark = report.remark ? ` - ${report.remark}` : ''
+      const normalizedRemark = normalizeRemark(report.remark)
+      const remark = normalizedRemark ? ` - ${normalizedRemark}` : ''
       return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${remark}`
     })
 
@@ -309,6 +381,6 @@ bot.on('message', async (msg) => {
       return
     }
 
-    await saveReport(chatId, status)
+    await saveReport(chatId, reporterId, status)
   }
 })
