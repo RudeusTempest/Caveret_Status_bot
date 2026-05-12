@@ -14,13 +14,15 @@ const localTimeZone = process.env.LOCAL_TIME_ZONE || 'Asia/Jerusalem'
 const labels = {
   report: 'דיווח',
   status: 'סטטוס',
+  todayReports: 'דיווחי היום',
   open: 'פתוח',
   closed: 'סגור'
 }
 
 const commands = {
   report: new Set([labels.report, 'Report']),
-  status: new Set([labels.status, 'Status'])
+  status: new Set([labels.status, 'Status']),
+  todayReports: new Set([labels.todayReports])
 }
 
 const statusByText = {
@@ -43,7 +45,8 @@ const statusIcon = {
 const mainKeyboard = {
   reply_markup: {
     keyboard: [
-      [labels.report, labels.status]
+      [labels.report, labels.status],
+      [labels.todayReports]
     ],
     resize_keyboard: true
   }
@@ -118,6 +121,27 @@ function getCurrentLocalDayRange(timeZone) {
   }
 }
 
+function formatReportTime(report) {
+  return new Date(report.created_at).toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: localTimeZone
+  })
+}
+
+async function getTodayReports() {
+  const { start, end } = getCurrentLocalDayRange(localTimeZone)
+  const { data } = await supabase
+    .from('reports')
+    .select('*')
+    .gte('created_at', start.toISOString())
+    .lt('created_at', end.toISOString())
+    .order('created_at', { ascending: false })
+
+  return data || []
+}
+
 // --- START MENU ---
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
@@ -146,36 +170,40 @@ bot.on('message', async (msg) => {
   }
 
   if (commands.status.has(text)) {
-    const { start, end } = getCurrentLocalDayRange(localTimeZone)
-    const { data } = await supabase
-      .from('reports')
-      .select('*')
-      .gte('created_at', start.toISOString())
-      .lt('created_at', end.toISOString())
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    const reports = await getTodayReports()
 
-    if (!data) {
+    if (!reports.length) {
       bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
       return
     }
 
-    const time = new Date(data.created_at)
-    const statusTime = time.toLocaleTimeString('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-      timeZone: localTimeZone
-    })
-    const currentStatus = statusText[data.status] ?? data.status
-    const currentStatusIcon = statusIcon[data.status] ?? ''
+    const latestReport = reports[0]
+    const statusTime = formatReportTime(latestReport)
+    const currentStatus = statusText[latestReport.status] ?? latestReport.status
+    const currentStatusIcon = statusIcon[latestReport.status] ?? ''
 
     bot.sendMessage(
       chatId,
       `סטטוס: ${currentStatus} ${currentStatusIcon}
 דיווח אחרון: ${statusTime}`
     )
+  }
+
+  if (commands.todayReports.has(text)) {
+    const reports = await getTodayReports()
+
+    if (!reports.length) {
+      bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
+      return
+    }
+
+    const reportLines = reports.map((report) => {
+      const reportStatus = statusText[report.status] ?? report.status
+      const reportIcon = statusIcon[report.status] ?? ''
+      return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}`
+    })
+
+    bot.sendMessage(chatId, `דיווחים אחרונים:\n${reportLines.join('\n')}`)
   }
 
   if (text in statusByText) {
