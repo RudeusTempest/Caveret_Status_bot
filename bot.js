@@ -15,6 +15,8 @@ const labels = {
   report: 'דיווח',
   status: 'סטטוס',
   todayReports: 'דיווחי היום',
+  addRemark: 'הוסף הערה',
+  finish: 'סיום (ללא הערה)',
   open: 'פתוח',
   closed: 'סגור'
 }
@@ -22,7 +24,9 @@ const labels = {
 const commands = {
   report: new Set([labels.report, 'Report']),
   status: new Set([labels.status, 'Status']),
-  todayReports: new Set([labels.todayReports])
+  todayReports: new Set([labels.todayReports]),
+  addRemark: new Set([labels.addRemark]),
+  finish: new Set([labels.finish])
 }
 
 const statusByText = {
@@ -51,6 +55,35 @@ const mainKeyboard = {
     resize_keyboard: true
   }
 }
+
+const reportKeyboard = {
+  reply_markup: {
+    keyboard: [
+      [labels.open, labels.closed]
+    ],
+    resize_keyboard: true
+  }
+}
+
+const statusKeyboard = {
+  reply_markup: {
+    keyboard: [
+      [labels.open, labels.closed]
+    ],
+    resize_keyboard: true
+  }
+}
+
+const remarkKeyboard = {
+  reply_markup: {
+    keyboard: [
+      [labels.addRemark, labels.finish]
+    ],
+    resize_keyboard: true
+  }
+}
+
+const pendingReports = new Map()
 
 function getTimeZoneParts(date, timeZone) {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -142,6 +175,29 @@ async function getTodayReports() {
   return data || []
 }
 
+async function saveReport(chatId, status, remark) {
+  const report = {
+    store_id: 'store_1',
+    status
+  }
+
+  if (remark) {
+    report.remark = remark
+  }
+
+  const { error } = await supabase.from('reports').insert(report)
+
+  if (error) {
+    console.error('Failed to save report:', error)
+    bot.sendMessage(chatId, 'לא ניתן לשמור את הדיווח.')
+    return false
+  }
+
+  pendingReports.delete(chatId)
+  bot.sendMessage(chatId, `נשמר: ${statusText[status] ?? status}`, mainKeyboard)
+  return true
+}
+
 // --- START MENU ---
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
@@ -159,14 +215,49 @@ bot.on('message', async (msg) => {
   }
 
   if (commands.report.has(text)) {
-    bot.sendMessage(chatId, 'דווח סטטוס:', {
-      reply_markup: {
-        keyboard: [
-          [labels.open, labels.closed]
-        ],
-        resize_keyboard: true
-      }
+    pendingReports.set(chatId, { awaitingStatus: true })
+    bot.sendMessage(chatId, 'דווח סטטוס:', reportKeyboard)
+    return
+  }
+
+  const pendingReport = pendingReports.get(chatId)
+
+  if (pendingReport?.awaitingRemark) {
+    const remark = text.trim()
+
+    if (!remark) {
+      bot.sendMessage(chatId, 'כתוב הערה:')
+      return
+    }
+
+    await saveReport(chatId, pendingReport.status, remark)
+    return
+  }
+
+  if (commands.addRemark.has(text)) {
+    if (!pendingReport?.status) {
+      pendingReports.set(chatId, { awaitingStatus: true })
+      bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
+      return
+    }
+
+    pendingReports.set(chatId, {
+      ...pendingReport,
+      awaitingRemark: true
     })
+    bot.sendMessage(chatId, 'כתוב הערה:')
+    return
+  }
+
+  if (commands.finish.has(text)) {
+    if (!pendingReport?.status) {
+      pendingReports.set(chatId, { awaitingStatus: true })
+      bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
+      return
+    }
+
+    await saveReport(chatId, pendingReport.status)
+    return
   }
 
   if (commands.status.has(text)) {
@@ -181,11 +272,12 @@ bot.on('message', async (msg) => {
     const statusTime = formatReportTime(latestReport)
     const currentStatus = statusText[latestReport.status] ?? latestReport.status
     const currentStatusIcon = statusIcon[latestReport.status] ?? ''
+    const remarkLine = latestReport.remark ? `\nהערה: ${latestReport.remark}` : ''
 
     bot.sendMessage(
       chatId,
       `סטטוס: ${currentStatus} ${currentStatusIcon}
-דיווח אחרון: ${statusTime}`
+דיווח אחרון: ${statusTime}${remarkLine}`
     )
   }
 
@@ -200,7 +292,8 @@ bot.on('message', async (msg) => {
     const reportLines = reports.map((report) => {
       const reportStatus = statusText[report.status] ?? report.status
       const reportIcon = statusIcon[report.status] ?? ''
-      return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}`
+      const remark = report.remark ? ` - ${report.remark}` : ''
+      return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${remark}`
     })
 
     bot.sendMessage(chatId, `דיווחים אחרונים:\n${reportLines.join('\n')}`)
@@ -208,12 +301,14 @@ bot.on('message', async (msg) => {
 
   if (text in statusByText) {
     const status = statusByText[text]
+    const pendingReport = pendingReports.get(chatId)
 
-    await supabase.from('reports').insert({
-      store_id: 'store_1',
-      status
-    })
+    if (pendingReport?.awaitingStatus) {
+      pendingReports.set(chatId, { status })
+      bot.sendMessage(chatId, 'להוסיף הערה?', remarkKeyboard)
+      return
+    }
 
-    bot.sendMessage(chatId, `נשמר: ${text}`, mainKeyboard)
+    await saveReport(chatId, status)
   }
 })
