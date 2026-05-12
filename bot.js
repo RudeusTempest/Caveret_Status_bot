@@ -9,6 +9,8 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 )
 
+const localTimeZone = process.env.LOCAL_TIME_ZONE || 'Asia/Jerusalem'
+
 const labels = {
   report: 'דיווח',
   status: 'סטטוס',
@@ -42,6 +44,75 @@ const mainKeyboard = {
   }
 }
 
+function getTimeZoneParts(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  })
+
+  return Object.fromEntries(
+    formatter
+      .formatToParts(date)
+      .filter(({ type }) => type !== 'literal')
+      .map(({ type, value }) => [type, Number(value)])
+  )
+}
+
+function getTimeZoneOffset(date, timeZone) {
+  const parts = getTimeZoneParts(date, timeZone)
+  const localAsUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  )
+
+  return localAsUtc - date.getTime()
+}
+
+function zonedDateTimeToUtc({ year, month, day }, timeZone) {
+  const localAsUtc = Date.UTC(year, month - 1, day)
+  const firstGuess = new Date(localAsUtc)
+  const offset = getTimeZoneOffset(firstGuess, timeZone)
+  const secondGuess = new Date(localAsUtc - offset)
+  const correctedOffset = getTimeZoneOffset(secondGuess, timeZone)
+
+  return new Date(localAsUtc - correctedOffset)
+}
+
+function addLocalDay({ year, month, day }) {
+  const nextDay = new Date(Date.UTC(year, month - 1, day + 1))
+
+  return {
+    year: nextDay.getUTCFullYear(),
+    month: nextDay.getUTCMonth() + 1,
+    day: nextDay.getUTCDate()
+  }
+}
+
+function getCurrentLocalDayRange(timeZone) {
+  const now = new Date()
+  const today = getTimeZoneParts(now, timeZone)
+  const todayDate = {
+    year: today.year,
+    month: today.month,
+    day: today.day
+  }
+
+  return {
+    start: zonedDateTimeToUtc(todayDate, timeZone),
+    end: zonedDateTimeToUtc(addLocalDay(todayDate), timeZone)
+  }
+}
+
 // --- START MENU ---
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
@@ -70,15 +141,18 @@ bot.on('message', async (msg) => {
   }
 
   if (commands.status.has(text)) {
+    const { start, end } = getCurrentLocalDayRange(localTimeZone)
     const { data } = await supabase
       .from('reports')
       .select('*')
+      .gte('created_at', start.toISOString())
+      .lt('created_at', end.toISOString())
       .order('created_at', { ascending: false })
       .limit(1)
-      .single()
+      .maybeSingle()
 
     if (!data) {
-      bot.sendMessage(chatId, 'אין דיווחים עדיין')
+      bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
       return
     }
 
@@ -88,7 +162,7 @@ bot.on('message', async (msg) => {
       hour: '2-digit',
       minute: '2-digit',
       hour12: false,
-      timeZone: 'Asia/Jerusalem'
+      timeZone: localTimeZone
     })
     const timeAgo = minutes === 1 ? 'לפני דקה' : `לפני ${minutes} דקות`
     const currentStatus = statusText[data.status] ?? data.status
