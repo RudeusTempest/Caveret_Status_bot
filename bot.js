@@ -35,6 +35,11 @@ const statusText = {
   closed: labels.closed
 }
 
+const statusIcon = {
+  open: '🟢',
+  closed: '🔴'
+}
+
 const mainKeyboard = {
   reply_markup: {
     keyboard: [
@@ -157,19 +162,19 @@ bot.on('message', async (msg) => {
     }
 
     const time = new Date(data.created_at)
-    const minutes = Math.floor((Date.now() - time) / 60000)
     const statusTime = time.toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
       hour12: false,
       timeZone: localTimeZone
     })
-    const timeAgo = minutes === 1 ? 'לפני דקה' : `לפני ${minutes} דקות`
     const currentStatus = statusText[data.status] ?? data.status
+    const currentStatusIcon = statusIcon[data.status] ?? ''
 
     bot.sendMessage(
       chatId,
-      `סטטוס אחרון: ${currentStatus} בשעה ${statusTime} (${timeAgo})`
+      `סטטוס: ${currentStatus} ${currentStatusIcon}
+דיווח אחרון: ${statusTime}`
     )
   }
 
