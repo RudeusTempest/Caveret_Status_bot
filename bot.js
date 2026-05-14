@@ -91,6 +91,34 @@ const remarkKeyboard = {
 
 const pendingReports = new Map()
 const lastReportTimes = new Map()
+const pendingReportTtlMs = 10 * 60 * 1000
+const todayReportsLimit = 50
+
+function clearCooldownAfterExpiry(reporterId, reportTime) {
+  setTimeout(() => {
+    if (lastReportTimes.get(reporterId) === reportTime) {
+      lastReportTimes.delete(reporterId)
+    }
+  }, reportCooldownMs + 1000).unref()
+}
+
+function setPendingReport(chatId, state) {
+  pendingReports.set(chatId, {
+    ...state,
+    expiresAt: Date.now() + pendingReportTtlMs
+  })
+}
+
+function getPendingReport(chatId) {
+  const pendingReport = pendingReports.get(chatId)
+
+  if (pendingReport?.expiresAt && pendingReport.expiresAt < Date.now()) {
+    pendingReports.delete(chatId)
+    return undefined
+  }
+
+  return pendingReport
+}
 
 function getTimeZoneParts(date, timeZone) {
   const formatter = new Intl.DateTimeFormat('en-US', {
@@ -174,12 +202,26 @@ async function getTodayReports() {
   const { start, end } = getCurrentLocalDayRange(localTimeZone)
   const { data } = await supabase
     .from('reports')
-    .select('*')
+    .select('created_at,status,remark')
     .gte('created_at', start.toISOString())
     .lt('created_at', end.toISOString())
     .order('created_at', { ascending: false })
+    .limit(todayReportsLimit)
 
   return data || []
+}
+
+async function getLatestTodayReport() {
+  const { start, end } = getCurrentLocalDayRange(localTimeZone)
+  const { data } = await supabase
+    .from('reports')
+    .select('created_at,status,remark')
+    .gte('created_at', start.toISOString())
+    .lt('created_at', end.toISOString())
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  return data?.[0]
 }
 
 function getReporterId(msg) {
@@ -249,7 +291,9 @@ async function saveReport(chatId, reporterId, status, remark) {
   }
 
   pendingReports.delete(chatId)
-  lastReportTimes.set(reporterId, Date.now())
+  const reportTime = Date.now()
+  lastReportTimes.set(reporterId, reportTime)
+  clearCooldownAfterExpiry(reporterId, reportTime)
   bot.sendMessage(chatId, `נשמר: ${statusText[status] ?? status}`, mainKeyboard)
   return true
 }
@@ -261,126 +305,146 @@ bot.onText(/\/start/, (msg) => {
   bot.sendMessage(chatId, 'בחר פעולה:', mainKeyboard)
 })
 
+bot.on('polling_error', (error) => {
+  console.error('Telegram polling error:', error.code, error.message)
+})
+
 // --- MAIN MENU HANDLER ---
 bot.on('message', async (msg) => {
-  const chatId = msg.chat.id
-  const reporterId = getReporterId(msg)
-  const text = msg.text
+  try {
+    const chatId = msg.chat.id
+    const reporterId = getReporterId(msg)
+    const text = msg.text
 
-  if (!text) {
-    return
-  }
-
-  if (commands.report.has(text)) {
-    const cooldownRemainingMs = getCooldownRemainingMs(reporterId)
-
-    if (cooldownRemainingMs > 0) {
-      pendingReports.delete(chatId)
-      bot.sendMessage(chatId, getCooldownMessage(cooldownRemainingMs), mainKeyboard)
+    if (!text) {
       return
     }
 
-    pendingReports.set(chatId, { awaitingStatus: true })
-    bot.sendMessage(chatId, 'דווח סטטוס:', reportKeyboard)
-    return
-  }
+    if (commands.report.has(text)) {
+      const cooldownRemainingMs = getCooldownRemainingMs(reporterId)
 
-  const pendingReport = pendingReports.get(chatId)
+      if (cooldownRemainingMs > 0) {
+        pendingReports.delete(chatId)
+        bot.sendMessage(chatId, getCooldownMessage(cooldownRemainingMs), mainKeyboard)
+        return
+      }
 
-  if (pendingReport?.awaitingRemark) {
-    if (commands.finish.has(text)) {
-      await saveReport(chatId, reporterId, pendingReport.status)
+      setPendingReport(chatId, { awaitingStatus: true })
+      bot.sendMessage(chatId, 'דווח סטטוס:', reportKeyboard)
       return
     }
 
-    const remark = normalizeRemark(text)
+    const pendingReport = getPendingReport(chatId)
 
-    if (!remark) {
+    if (pendingReport?.awaitingRemark) {
+      if (commands.finish.has(text)) {
+        await saveReport(chatId, reporterId, pendingReport.status)
+        return
+      }
+
+      const remark = normalizeRemark(text)
+
+      if (!remark) {
+        bot.sendMessage(chatId, 'כתוב הערה:')
+        return
+      }
+
+      await saveReport(chatId, reporterId, pendingReport.status, remark)
+      return
+    }
+
+    if (commands.addRemark.has(text)) {
+      if (!pendingReport?.status) {
+        setPendingReport(chatId, { awaitingStatus: true })
+        bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
+        return
+      }
+
+      setPendingReport(chatId, {
+        ...pendingReport,
+        awaitingRemark: true
+      })
       bot.sendMessage(chatId, 'כתוב הערה:')
       return
     }
 
-    await saveReport(chatId, reporterId, pendingReport.status, remark)
-    return
-  }
+    if (commands.finish.has(text)) {
+      if (!pendingReport?.status) {
+        setPendingReport(chatId, { awaitingStatus: true })
+        bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
+        return
+      }
 
-  if (commands.addRemark.has(text)) {
-    if (!pendingReport?.status) {
-      pendingReports.set(chatId, { awaitingStatus: true })
-      bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
+      await saveReport(chatId, reporterId, pendingReport.status)
       return
     }
 
-    pendingReports.set(chatId, {
-      ...pendingReport,
-      awaitingRemark: true
-    })
-    bot.sendMessage(chatId, 'כתוב הערה:')
-    return
-  }
+    if (commands.status.has(text)) {
+      const latestReport = await getLatestTodayReport()
 
-  if (commands.finish.has(text)) {
-    if (!pendingReport?.status) {
-      pendingReports.set(chatId, { awaitingStatus: true })
-      bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
-      return
-    }
+      if (!latestReport) {
+        bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
+        return
+      }
 
-    await saveReport(chatId, reporterId, pendingReport.status)
-    return
-  }
+      const statusTime = formatReportTime(latestReport)
+      const currentStatus = statusText[latestReport.status] ?? latestReport.status
+      const currentStatusIcon = statusIcon[latestReport.status] ?? ''
+      const latestRemark = normalizeRemark(latestReport.remark)
+      const remarkLine = latestRemark ? `\nהערה: ${latestRemark}` : ''
 
-  if (commands.status.has(text)) {
-    const reports = await getTodayReports()
-
-    if (!reports.length) {
-      bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
-      return
-    }
-
-    const latestReport = reports[0]
-    const statusTime = formatReportTime(latestReport)
-    const currentStatus = statusText[latestReport.status] ?? latestReport.status
-    const currentStatusIcon = statusIcon[latestReport.status] ?? ''
-    const latestRemark = normalizeRemark(latestReport.remark)
-    const remarkLine = latestRemark ? `\nהערה: ${latestRemark}` : ''
-
-    bot.sendMessage(
-      chatId,
-      `סטטוס: ${currentStatus} ${currentStatusIcon}
+      bot.sendMessage(
+        chatId,
+        `סטטוס: ${currentStatus} ${currentStatusIcon}
 דיווח אחרון: ${statusTime}${remarkLine}`
-    )
-  }
-
-  if (commands.todayReports.has(text)) {
-    const reports = await getTodayReports()
-
-    if (!reports.length) {
-      bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
-      return
+      )
     }
 
-    const reportLines = reports.map((report) => {
-      const reportStatus = statusText[report.status] ?? report.status
-      const reportIcon = statusIcon[report.status] ?? ''
-      const normalizedRemark = normalizeRemark(report.remark)
-      const remark = normalizedRemark ? ` - ${normalizedRemark}` : ''
-      return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${remark}`
-    })
+    if (commands.todayReports.has(text)) {
+      const reports = await getTodayReports()
 
-    bot.sendMessage(chatId, `דיווחים אחרונים:\n${reportLines.join('\n')}`)
-  }
+      if (!reports.length) {
+        bot.sendMessage(chatId, 'לא נשלחו דיווחים היום.')
+        return
+      }
 
-  if (text in statusByText) {
-    const status = statusByText[text]
-    const pendingReport = pendingReports.get(chatId)
+      const reportLines = reports.map((report) => {
+        const reportStatus = statusText[report.status] ?? report.status
+        const reportIcon = statusIcon[report.status] ?? ''
+        const normalizedRemark = normalizeRemark(report.remark)
+        const remark = normalizedRemark ? ` - ${normalizedRemark}` : ''
+        return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${remark}`
+      })
 
-    if (pendingReport?.awaitingStatus) {
-      pendingReports.set(chatId, { status })
-      bot.sendMessage(chatId, 'להוסיף הערה?', remarkKeyboard)
-      return
+      const limitedMessage = reports.length === todayReportsLimit
+        ? `דיווחים אחרונים (${todayReportsLimit} אחרונים):`
+        : 'דיווחים אחרונים:'
+
+      bot.sendMessage(chatId, `${limitedMessage}\n${reportLines.join('\n')}`)
     }
 
-    await saveReport(chatId, reporterId, status)
+    if (text in statusByText) {
+      const status = statusByText[text]
+      const pendingReport = getPendingReport(chatId)
+
+      if (pendingReport?.awaitingStatus) {
+        setPendingReport(chatId, { status })
+        bot.sendMessage(chatId, 'להוסיף הערה?', remarkKeyboard)
+        return
+      }
+
+      await saveReport(chatId, reporterId, status)
+    }
+  } catch (error) {
+    console.error('Message handler failed:', error)
   }
 })
+
+async function shutdown(signal) {
+  console.log(`${signal} received, stopping Telegram polling`)
+  await bot.stopPolling()
+  process.exit(0)
+}
+
+process.once('SIGTERM', shutdown)
+process.once('SIGINT', shutdown)
