@@ -18,6 +18,7 @@ const labels = {
   todayReports: 'דיווחי היום',
   addRemark: 'הוסף הערה',
   finish: 'סיום (ללא הערה)',
+  cancel: 'ביטול',
   open: 'פתוח',
   closed: 'סגור'
 }
@@ -27,7 +28,8 @@ const commands = {
   status: new Set([labels.status, 'Status']),
   todayReports: new Set([labels.todayReports]),
   addRemark: new Set([labels.addRemark]),
-  finish: new Set([labels.finish])
+  finish: new Set([labels.finish]),
+  cancel: new Set([labels.cancel, 'Cancel'])
 }
 
 const statusByText = {
@@ -49,7 +51,8 @@ const statusIcon = {
 
 const reservedRemarkTexts = new Set([
   labels.addRemark,
-  labels.finish
+  labels.finish,
+  labels.cancel
 ])
 
 const mainKeyboard = {
@@ -65,7 +68,8 @@ const mainKeyboard = {
 const reportKeyboard = {
   reply_markup: {
     keyboard: [
-      [labels.open, labels.closed]
+      [labels.open, labels.closed],
+      [labels.cancel]
     ],
     resize_keyboard: true
   }
@@ -83,7 +87,8 @@ const statusKeyboard = {
 const remarkKeyboard = {
   reply_markup: {
     keyboard: [
-      [labels.addRemark, labels.finish]
+      [labels.addRemark, labels.finish],
+      [labels.cancel]
     ],
     resize_keyboard: true
   }
@@ -248,6 +253,11 @@ function getCooldownMessage(remainingMs) {
   return `אפשר לשלוח דיווח נוסף בעוד ${remainingMinutes} דקות.`
 }
 
+function cancelPendingReport(chatId) {
+  pendingReports.delete(chatId)
+  bot.sendMessage(chatId, 'הדיווח בוטל.', mainKeyboard)
+}
+
 function normalizeRemark(remark) {
   if (typeof remark !== 'string') {
     return ''
@@ -335,6 +345,16 @@ bot.on('message', async (msg) => {
     }
 
     const pendingReport = getPendingReport(chatId)
+
+    if (commands.cancel.has(text)) {
+      if (pendingReport) {
+        cancelPendingReport(chatId)
+        return
+      }
+
+      bot.sendMessage(chatId, 'בחר פעולה:', mainKeyboard)
+      return
+    }
 
     if (pendingReport?.awaitingRemark) {
       if (commands.finish.has(text)) {
