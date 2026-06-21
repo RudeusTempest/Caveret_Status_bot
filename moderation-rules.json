@@ -1,0 +1,26 @@
+{
+  "words": {
+    "זין": 10,
+    "מזדיין": 10,
+    "חרא": 10,
+    "כוסאמאשלך": 10,
+    "זונה": 10,
+    "שרמוטה": 10,
+    "מניאק": 10,
+    "נאצי": 10,
+    "כלבה": 10,
+
+
+    "curse_word_example": 7
+  },
+  "phrases": {},
+  "replacement": "&!@#%",
+  "thresholds": {
+    "allow": 0,
+    "review": 5,
+    "reject": 10
+  },
+  "logging": {
+    "includeText": false
+  }
+}

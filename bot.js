@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import TelegramBot from 'node-telegram-bot-api'
 import { createClient } from '@supabase/supabase-js'
+import { getModerationLoggingConfig, moderateComment, sanitizeComment } from './moderation.js'
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true })
 
@@ -258,18 +259,55 @@ function cancelPendingReport(chatId) {
   bot.sendMessage(chatId, 'הדיווח בוטל.', mainKeyboard)
 }
 
+function collapseRemarkWhitespace(remark) {
+  let collapsed = ''
+  let previousWasSpace = true
+
+  for (const char of remark.trim()) {
+    const isSpace = char === ' ' || char === '\n' || char === '\r' || char === '\t'
+
+    if (isSpace) {
+      if (!previousWasSpace) {
+        collapsed += ' '
+        previousWasSpace = true
+      }
+      continue
+    }
+
+    collapsed += char
+    previousWasSpace = false
+  }
+
+  return collapsed
+}
+
 function normalizeRemark(remark) {
   if (typeof remark !== 'string') {
     return ''
   }
 
-  const trimmedRemark = remark.trim()
+  const trimmedRemark = collapseRemarkWhitespace(remark)
 
   if (!trimmedRemark || reservedRemarkTexts.has(trimmedRemark)) {
     return ''
   }
 
   return trimmedRemark
+}
+
+function logModeration(reporterId, moderationResult, remark) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    userId: reporterId,
+    score: moderationResult.score,
+    action: moderationResult.action
+  }
+
+  if (getModerationLoggingConfig().includeText) {
+    logEntry.text = remark
+  }
+
+  console.log('Comment moderation:', logEntry)
 }
 
 async function saveReport(chatId, reporterId, status, remark) {
@@ -289,7 +327,15 @@ async function saveReport(chatId, reporterId, status, remark) {
   const normalizedRemark = normalizeRemark(remark)
 
   if (normalizedRemark) {
-    report.remark = normalizedRemark
+    const moderationResult = moderateComment(normalizedRemark)
+
+    if (moderationResult.action !== 'allow') {
+      logModeration(reporterId, moderationResult, normalizedRemark)
+    }
+
+    report.remark = moderationResult.action === 'allow'
+      ? normalizedRemark
+      : sanitizeComment(normalizedRemark)
   }
 
   const { error } = await supabase.from('reports').insert(report)
