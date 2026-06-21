@@ -17,6 +17,7 @@ const labels = {
   report: 'דיווח',
   status: 'סטטוס',
   todayReports: 'דיווחי היום',
+  analytics: 'נתוני שימוש',
   addRemark: 'הוסף הערה',
   finish: 'סיום (ללא הערה)',
   cancel: 'ביטול',
@@ -28,6 +29,7 @@ const commands = {
   report: new Set([labels.report, 'Report']),
   status: new Set([labels.status, 'Status']),
   todayReports: new Set([labels.todayReports]),
+  analytics: new Set([labels.analytics, '/analytics', 'Analytics']),
   addRemark: new Set([labels.addRemark]),
   finish: new Set([labels.finish]),
   cancel: new Set([labels.cancel, 'Cancel'])
@@ -99,6 +101,13 @@ const pendingReports = new Map()
 const lastReportTimes = new Map()
 const pendingReportTtlMs = 10 * 60 * 1000
 const todayReportsLimit = 50
+const analyticsUsersLimit = 20
+const adminUserIds = new Set(
+  (process.env.ADMIN_USER_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean)
+)
 
 function clearCooldownAfterExpiry(reporterId, reportTime) {
   setTimeout(() => {
@@ -204,11 +213,98 @@ function formatReportTime(report) {
   })
 }
 
+function getDisplayName(user = {}) {
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ')
+
+  return fullName || user.username || String(user.id || '')
+}
+
+function getUserProfile(msg) {
+  const user = msg.from || {}
+
+  return {
+    telegram_user_id: user.id ? String(user.id) : String(msg.chat.id),
+    chat_id: String(msg.chat.id),
+    username: user.username || null,
+    first_name: user.first_name || null,
+    last_name: user.last_name || null,
+    display_name: getDisplayName(user),
+    language_code: user.language_code || null,
+    is_bot: Boolean(user.is_bot)
+  }
+}
+
+function isAdmin(msg) {
+  if (!adminUserIds.size) {
+    return false
+  }
+
+  return adminUserIds.has(String(getReporterId(msg)))
+}
+
+function formatUserName(user = {}) {
+  const displayName = user.reporter_name || user.display_name || user.first_name || user.username
+  const username = user.username ? `@${user.username}` : ''
+
+  if (displayName && username && displayName !== username) {
+    return `${displayName} (${username})`
+  }
+
+  return displayName || username || `ID ${user.telegram_user_id || 'unknown'}`
+}
+
+async function saveBotUser(msg) {
+  const profile = getUserProfile(msg)
+
+  const { error } = await supabase
+    .from('bot_users')
+    .upsert(
+      {
+        telegram_user_id: profile.telegram_user_id,
+        username: profile.username,
+        first_name: profile.first_name,
+        last_name: profile.last_name,
+        display_name: profile.display_name,
+        language_code: profile.language_code,
+        is_bot: profile.is_bot,
+        last_seen_at: new Date().toISOString()
+      },
+      { onConflict: 'telegram_user_id' }
+    )
+
+  if (error) {
+    console.error('Failed to save bot user:', error)
+  }
+
+  return profile
+}
+
+async function logAnalyticsEvent(msg, eventType, metadata = {}) {
+  const profile = await saveBotUser(msg)
+
+  const { error } = await supabase
+    .from('analytics_events')
+    .insert({
+      event_type: eventType,
+      telegram_user_id: profile.telegram_user_id,
+      chat_id: profile.chat_id,
+      username: profile.username,
+      display_name: profile.display_name,
+      metadata
+    })
+
+  if (error) {
+    console.error('Failed to save analytics event:', error)
+  }
+
+  return profile
+}
+
 async function getTodayReports() {
   const { start, end } = getCurrentLocalDayRange(localTimeZone)
   const { data } = await supabase
     .from('reports')
-    .select('created_at,status,remark')
+    .select('created_at,status,remark,telegram_user_id,username,reporter_name')
     .gte('created_at', start.toISOString())
     .lt('created_at', end.toISOString())
     .order('created_at', { ascending: false })
@@ -221,13 +317,126 @@ async function getLatestTodayReport() {
   const { start, end } = getCurrentLocalDayRange(localTimeZone)
   const { data } = await supabase
     .from('reports')
-    .select('created_at,status,remark')
+    .select('created_at,status,remark,telegram_user_id,username,reporter_name')
     .gte('created_at', start.toISOString())
     .lt('created_at', end.toISOString())
     .order('created_at', { ascending: false })
     .limit(1)
 
   return data?.[0]
+}
+
+async function getTodayAnalytics() {
+  const { start, end } = getCurrentLocalDayRange(localTimeZone)
+  const [eventsResult, reportsResult] = await Promise.all([
+    supabase
+      .from('analytics_events')
+      .select('event_type,telegram_user_id,username,display_name,created_at')
+      .gte('created_at', start.toISOString())
+      .lt('created_at', end.toISOString())
+      .order('created_at', { ascending: true })
+      .limit(5000),
+    supabase
+      .from('reports')
+      .select('created_at,status,remark,telegram_user_id,username,reporter_name')
+      .gte('created_at', start.toISOString())
+      .lt('created_at', end.toISOString())
+      .order('created_at', { ascending: false })
+      .limit(5000)
+  ])
+
+  if (eventsResult.error) {
+    throw eventsResult.error
+  }
+
+  if (reportsResult.error) {
+    throw reportsResult.error
+  }
+
+  return {
+    events: eventsResult.data || [],
+    reports: reportsResult.data || []
+  }
+}
+
+function buildTodayAnalyticsMessage(events, reports) {
+  const users = new Map()
+  const eventTotals = {
+    press_status: 0,
+    press_today_reports: 0,
+    press_report: 0
+  }
+
+  function getUserStats(user) {
+    const key = user.telegram_user_id || 'unknown'
+
+    if (!users.has(key)) {
+      users.set(key, {
+        telegram_user_id: user.telegram_user_id,
+        username: user.username,
+        display_name: user.display_name || user.reporter_name,
+        press_status: 0,
+        press_today_reports: 0,
+        press_report: 0,
+        submit_report: 0
+      })
+    }
+
+    const stats = users.get(key)
+    stats.username ||= user.username
+    stats.display_name ||= user.display_name || user.reporter_name
+
+    return stats
+  }
+
+  for (const event of events) {
+    if (event.event_type in eventTotals) {
+      eventTotals[event.event_type] += 1
+      getUserStats(event)[event.event_type] += 1
+    } else if (event.telegram_user_id) {
+      getUserStats(event)
+    }
+  }
+
+  for (const report of reports) {
+    const stats = getUserStats(report)
+    stats.submit_report += 1
+  }
+
+  const userStats = [...users.values()]
+    .sort((a, b) => {
+      const totalA = a.press_status + a.press_today_reports + a.press_report + a.submit_report
+      const totalB = b.press_status + b.press_today_reports + b.press_report + b.submit_report
+      return totalB - totalA
+    })
+    .slice(0, analyticsUsersLimit)
+
+  const userLines = userStats.map((user, index) => (
+    `${index + 1}. ${formatUserName(user)} - סטטוס: ${user.press_status}, דיווחי היום: ${user.press_today_reports}, התחיל דיווח: ${user.press_report}, שלח דיווח: ${user.submit_report}`
+  ))
+
+  const reportLines = reports.slice(0, todayReportsLimit).map((report) => {
+    const reportStatus = statusText[report.status] ?? report.status
+    const reportIcon = statusIcon[report.status] ?? ''
+    const normalizedRemark = normalizeRemark(report.remark)
+    const remark = normalizedRemark ? ` - ${normalizedRemark}` : ''
+    return `${formatReportTime(report)} - ${reportStatus} ${reportIcon} - ${formatUserName(report)}${remark}`
+  })
+
+  return [
+    'נתוני שימוש היום:',
+    `משתמשים שונים: ${users.size}`,
+    `לחצו סטטוס: ${eventTotals.press_status}`,
+    `לחצו דיווחי היום: ${eventTotals.press_today_reports}`,
+    `התחילו דיווח: ${eventTotals.press_report}`,
+    `שלחו דיווח: ${reports.length}`,
+    '',
+    'לפי משתמש:',
+    userLines.length ? userLines.join('\n') : 'אין פעילות היום.',
+    '',
+    'דיווחים היום:',
+    reportLines.length ? reportLines.join('\n') : 'לא נשלחו דיווחים היום.'
+  ].join('\n')
 }
 
 function getReporterId(msg) {
@@ -310,7 +519,9 @@ function logModeration(reporterId, moderationResult, remark) {
   console.log('Comment moderation:', logEntry)
 }
 
-async function saveReport(chatId, reporterId, status, remark) {
+async function saveReport(msg, status, remark) {
+  const chatId = msg.chat.id
+  const reporterId = getReporterId(msg)
   const cooldownRemainingMs = getCooldownRemainingMs(reporterId)
 
   if (cooldownRemainingMs > 0) {
@@ -319,9 +530,14 @@ async function saveReport(chatId, reporterId, status, remark) {
     return false
   }
 
+  const profile = await saveBotUser(msg)
   const report = {
     store_id: 'store_1',
-    status
+    status,
+    telegram_user_id: profile.telegram_user_id,
+    chat_id: profile.chat_id,
+    username: profile.username,
+    reporter_name: profile.display_name
   }
 
   const normalizedRemark = normalizeRemark(remark)
@@ -350,6 +566,7 @@ async function saveReport(chatId, reporterId, status, remark) {
   const reportTime = Date.now()
   lastReportTimes.set(reporterId, reportTime)
   clearCooldownAfterExpiry(reporterId, reportTime)
+  await logAnalyticsEvent(msg, 'submit_report', { status, has_remark: Boolean(normalizedRemark) })
   bot.sendMessage(chatId, `נשמר: ${statusText[status] ?? status}`, mainKeyboard)
   return true
 }
@@ -358,6 +575,9 @@ async function saveReport(chatId, reporterId, status, remark) {
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id
 
+  logAnalyticsEvent(msg, 'start').catch((error) => {
+    console.error('Failed to log start:', error)
+  })
   bot.sendMessage(chatId, 'בחר פעולה:', mainKeyboard)
 })
 
@@ -377,6 +597,7 @@ bot.on('message', async (msg) => {
     }
 
     if (commands.report.has(text)) {
+      await logAnalyticsEvent(msg, 'press_report')
       const cooldownRemainingMs = getCooldownRemainingMs(reporterId)
 
       if (cooldownRemainingMs > 0) {
@@ -394,6 +615,7 @@ bot.on('message', async (msg) => {
 
     if (commands.cancel.has(text)) {
       if (pendingReport) {
+        await logAnalyticsEvent(msg, 'cancel_report')
         cancelPendingReport(chatId)
         return
       }
@@ -404,7 +626,8 @@ bot.on('message', async (msg) => {
 
     if (pendingReport?.awaitingRemark) {
       if (commands.finish.has(text)) {
-        await saveReport(chatId, reporterId, pendingReport.status)
+        await logAnalyticsEvent(msg, 'finish_without_remark')
+        await saveReport(msg, pendingReport.status)
         return
       }
 
@@ -415,11 +638,12 @@ bot.on('message', async (msg) => {
         return
       }
 
-      await saveReport(chatId, reporterId, pendingReport.status, remark)
+      await saveReport(msg, pendingReport.status, remark)
       return
     }
 
     if (commands.addRemark.has(text)) {
+      await logAnalyticsEvent(msg, 'press_add_remark')
       if (!pendingReport?.status) {
         setPendingReport(chatId, { awaitingStatus: true })
         bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
@@ -435,17 +659,19 @@ bot.on('message', async (msg) => {
     }
 
     if (commands.finish.has(text)) {
+      await logAnalyticsEvent(msg, 'finish_without_remark')
       if (!pendingReport?.status) {
         setPendingReport(chatId, { awaitingStatus: true })
         bot.sendMessage(chatId, 'בחר קודם סטטוס:', statusKeyboard)
         return
       }
 
-      await saveReport(chatId, reporterId, pendingReport.status)
+      await saveReport(msg, pendingReport.status)
       return
     }
 
     if (commands.status.has(text)) {
+      await logAnalyticsEvent(msg, 'press_status')
       const latestReport = await getLatestTodayReport()
 
       if (!latestReport) {
@@ -458,15 +684,19 @@ bot.on('message', async (msg) => {
       const currentStatusIcon = statusIcon[latestReport.status] ?? ''
       const latestRemark = normalizeRemark(latestReport.remark)
       const remarkLine = latestRemark ? `\nהערה: ${latestRemark}` : ''
+      const reporterLine = latestReport.telegram_user_id
+        ? `\nדווח על ידי: ${formatUserName(latestReport)}`
+        : ''
 
       bot.sendMessage(
         chatId,
         `סטטוס: ${currentStatus} ${currentStatusIcon}
-דיווח אחרון: ${statusTime}${remarkLine}`
+דיווח אחרון: ${statusTime}${reporterLine}${remarkLine}`
       )
     }
 
     if (commands.todayReports.has(text)) {
+      await logAnalyticsEvent(msg, 'press_today_reports')
       const reports = await getTodayReports()
 
       if (!reports.length) {
@@ -479,7 +709,8 @@ bot.on('message', async (msg) => {
         const reportIcon = statusIcon[report.status] ?? ''
         const normalizedRemark = normalizeRemark(report.remark)
         const remark = normalizedRemark ? ` - ${normalizedRemark}` : ''
-        return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${remark}`
+        const reporter = report.telegram_user_id ? ` - ${formatUserName(report)}` : ''
+        return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${reporter}${remark}`
       })
 
       const limitedMessage = reports.length === todayReportsLimit
@@ -489,17 +720,31 @@ bot.on('message', async (msg) => {
       bot.sendMessage(chatId, `${limitedMessage}\n${reportLines.join('\n')}`)
     }
 
+    if (commands.analytics.has(text)) {
+      await logAnalyticsEvent(msg, 'press_analytics')
+
+      if (!isAdmin(msg)) {
+        bot.sendMessage(chatId, 'אין הרשאה לצפות בנתוני שימוש.')
+        return
+      }
+
+      const { events, reports } = await getTodayAnalytics()
+      bot.sendMessage(chatId, buildTodayAnalyticsMessage(events, reports))
+      return
+    }
+
     if (text in statusByText) {
       const status = statusByText[text]
       const pendingReport = getPendingReport(chatId)
 
       if (pendingReport?.awaitingStatus) {
+        await logAnalyticsEvent(msg, 'choose_report_status', { status })
         setPendingReport(chatId, { status })
         bot.sendMessage(chatId, 'להוסיף הערה?', remarkKeyboard)
         return
       }
 
-      await saveReport(chatId, reporterId, status)
+      await saveReport(msg, status)
     }
   } catch (error) {
     console.error('Message handler failed:', error)

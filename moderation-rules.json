@@ -9,9 +9,15 @@
     "מניאק": 10,
     "נאצי": 10,
     "כלבה": 10,
-
-
-    "curse_word_example": 7
+    "פאק": 10,
+    "fuck": 10,
+    "cunt": 10,
+    "pussy": 10,
+    "slut": 10,
+    "whore": 10,
+    "bitch": 10,
+    "asshole": 10,
+    "nazi": 10
   },
   "phrases": {},
   "replacement": "&!@#%",
