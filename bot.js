@@ -366,6 +366,10 @@ function buildTodayAnalyticsMessage(events, reports) {
     press_today_reports: 0,
     press_report: 0
   }
+  const statusUserIds = new Set()
+  const todayReportsUserIds = new Set()
+  const activeViewerUserIds = new Set()
+  const reportUserIds = new Set()
 
   function getUserStats(user) {
     const key = user.telegram_user_id || 'unknown'
@@ -393,6 +397,16 @@ function buildTodayAnalyticsMessage(events, reports) {
     if (event.event_type in eventTotals) {
       eventTotals[event.event_type] += 1
       getUserStats(event)[event.event_type] += 1
+
+      if (event.telegram_user_id && event.event_type === 'press_status') {
+        statusUserIds.add(event.telegram_user_id)
+        activeViewerUserIds.add(event.telegram_user_id)
+      }
+
+      if (event.telegram_user_id && event.event_type === 'press_today_reports') {
+        todayReportsUserIds.add(event.telegram_user_id)
+        activeViewerUserIds.add(event.telegram_user_id)
+      }
     } else if (event.telegram_user_id) {
       getUserStats(event)
     }
@@ -401,6 +415,10 @@ function buildTodayAnalyticsMessage(events, reports) {
   for (const report of reports) {
     const stats = getUserStats(report)
     stats.submit_report += 1
+
+    if (report.telegram_user_id) {
+      reportUserIds.add(report.telegram_user_id)
+    }
   }
 
   const userStats = [...users.values()]
@@ -424,12 +442,19 @@ function buildTodayAnalyticsMessage(events, reports) {
   })
 
   return [
-    'נתוני שימוש היום:',
-    `משתמשים שונים: ${users.size}`,
-    `לחצו סטטוס: ${eventTotals.press_status}`,
-    `לחצו דיווחי היום: ${eventTotals.press_today_reports}`,
-    `התחילו דיווח: ${eventTotals.press_report}`,
-    `שלחו דיווח: ${reports.length}`,
+    'נתוני שימוש - היום',
+    '',
+    'משתמשים יומיים:',
+    `צפו בסטטוס או בדיווחי היום: ${activeViewerUserIds.size}`,
+    `משתמשים שונים שלחצו סטטוס: ${statusUserIds.size}`,
+    `משתמשים שונים שלחצו דיווחי היום: ${todayReportsUserIds.size}`,
+    `משתמשים שונים ששלחו דיווח: ${reportUserIds.size}`,
+    '',
+    'פעולות:',
+    `לחיצות סטטוס: ${eventTotals.press_status}`,
+    `לחיצות דיווחי היום: ${eventTotals.press_today_reports}`,
+    `התחלות דיווח: ${eventTotals.press_report}`,
+    `דיווחים שנשלחו: ${reports.length}`,
     '',
     'לפי משתמש:',
     userLines.length ? userLines.join('\n') : 'אין פעילות היום.',
@@ -684,14 +709,11 @@ bot.on('message', async (msg) => {
       const currentStatusIcon = statusIcon[latestReport.status] ?? ''
       const latestRemark = normalizeRemark(latestReport.remark)
       const remarkLine = latestRemark ? `\nהערה: ${latestRemark}` : ''
-      const reporterLine = latestReport.telegram_user_id
-        ? `\nדווח על ידי: ${formatUserName(latestReport)}`
-        : ''
 
       bot.sendMessage(
         chatId,
         `סטטוס: ${currentStatus} ${currentStatusIcon}
-דיווח אחרון: ${statusTime}${reporterLine}${remarkLine}`
+דיווח אחרון: ${statusTime}${remarkLine}`
       )
     }
 
@@ -709,8 +731,7 @@ bot.on('message', async (msg) => {
         const reportIcon = statusIcon[report.status] ?? ''
         const normalizedRemark = normalizeRemark(report.remark)
         const remark = normalizedRemark ? ` - ${normalizedRemark}` : ''
-        const reporter = report.telegram_user_id ? ` - ${formatUserName(report)}` : ''
-        return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${reporter}${remark}`
+        return `${formatReportTime(report)} - ${reportStatus} ${reportIcon}${remark}`
       })
 
       const limitedMessage = reports.length === todayReportsLimit
