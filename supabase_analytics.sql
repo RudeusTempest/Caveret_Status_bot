@@ -10,6 +10,14 @@ create table if not exists bot_users (
   last_seen_at timestamptz not null default now()
 );
 
+create table if not exists reports (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  store_id text not null,
+  status text not null check (status in ('open', 'closed')),
+  remark text
+);
+
 create table if not exists analytics_events (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),

@@ -1,8 +1,9 @@
+import 'dotenv/config'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
-  'https://xunyaxrufifqtcmpjnhw.supabase.co',
-  'sb_publishable_tGMUVt2M-Zxgr_I30vWVOA_RZyjqdBk'
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
 )
 
 async function test() {
